@@ -47,6 +47,7 @@ const SPIN_RPM: Record<number, number | undefined> = {
     0x05: 800,
     0x07: 1000,
     0x09: 1200,
+    0x0a: 1400,
     0xff: 1400,
 }
 
