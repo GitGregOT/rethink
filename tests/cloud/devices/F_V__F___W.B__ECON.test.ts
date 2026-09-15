@@ -2,7 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import DUT from '@/cloud/devices/F_V__F___W.B__ECON'
 import type { Metadata } from '@/cloud/thinq'
-import { MockHAConnection, MockThinq2Device } from '@/tests/helpers/mocks'
+import { MockHAConnection, MockThinq2Device, hex } from '@/tests/helpers/mocks'
 
 const DEVICE_ID = 'test-id'
 const MODEL_ID = 'F_V__F___W.B__ECON'
@@ -35,6 +35,37 @@ const COURSE_CHANGE_60 = packet(
 )
 
 /*
+ * Captured while manually changing from Synthetics to
+ * Allergy Care.
+ *
+ * The second/newer snapshot reports spin byte 0x0a,
+ * which the CV9014WC2 reports as 1400 RPM.
+ */
+const ALLERGY_CARE_1400RPM_60 = packet(
+    'aaff200a006000a7bb000100ec004e00',
+    '0004023102310200030a040100000000',
+    '42210001010014003c00000300000000',
+    '000000000000000004023002302d0003',
+    '0a06010000008002200001010014003c',
+    '000005000000000000000000000b95bb',
+)
+
+/*
+ * Captured while manually selecting the Drying course.
+ *
+ * The second/newer snapshot reports course 0x18 (Drying)
+ * and dry mode 0x02 (Auto).
+ */
+const DRYING_AUTO_60 = packet(
+    'aaff200a006000a897000100ec004e00',
+    '0006000e000e0c000302020100000001',
+    '42200001010014003c00000100000000',
+    '00000000000000000201000100180000',
+    '0000000200000040000006090014003c',
+    '00000000000000000000000000d3dfbb',
+)
+
+/*
  * Captured with Cotton selected at 40 °C and 1200 RPM.
  */
 const COTTON_40C_1200RPM_39 = packet(
@@ -42,6 +73,40 @@ const COTTON_40C_1200RPM_39 = packet(
     '040217021701000309040100000000022100010100190000000004000109',
     '00000000000000da09bb',
 )
+
+/*
+ * Exact F026 start-program frames captured from the CV9014WC2.
+ *
+ * These validate the per-course defaults used when a course is staged
+ * and then started without overriding its spin, temperature, rinse,
+ * dry mode, delay, or option values.
+ */
+const START_PROGRAM_CAPTURES = [
+    {
+        program: 'Cotton',
+        frame: 'AA16F0260103FF04010000000000030000000000B4BB',
+    },
+    {
+        program: 'Synthetics',
+        frame: 'AA16F0260203FF04010000000000030000000000B7BB',
+    },
+    {
+        program: 'Cotton+',
+        frame: 'AA16F0260403FF06010000000000030000000000B3BB',
+    },
+    {
+        program: 'Mix',
+        frame: 'AA16F02607030704010000000000030000000000BABB',
+    },
+    {
+        program: 'Steam refresh',
+        frame: 'AA16F0260D00000000000000008003000000000033BB',
+    },
+    {
+        program: 'Quick 14',
+        frame: 'AA16F0260C030202010000000001030000000000BBBB',
+    },
+] as const
 
 function makeDevice() {
     const ha = new MockHAConnection()
@@ -90,6 +155,36 @@ describe(MODEL_ID, () => {
         assert.equal(properties.remote_start, 'ON')
     })
 
+    test('0x60 packet decodes reported 0x0a spin as 1400 RPM', () => {
+        const { ha, thinq } = makeDevice()
+
+        thinq.emit('data', ALLERGY_CARE_1400RPM_60)
+
+        const properties = ha.devices[DEVICE_ID].properties
+
+        assert.equal(properties.course, 'Allergy Care')
+        assert.equal(properties.remaining_time, 168)
+        assert.equal(properties.initial_time, 168)
+        assert.equal(properties.spin, 1400)
+        assert.equal(properties.temp, 60)
+        assert.equal(properties.dry, 'Off')
+        assert.equal(properties.steam, 'ON')
+        assert.equal(properties.remote_start, 'ON')
+    })
+
+    test('0x60 packet decodes captured Drying course and Auto dry mode', () => {
+        const { ha, thinq } = makeDevice()
+
+        thinq.emit('data', DRYING_AUTO_60)
+
+        const properties = ha.devices[DEVICE_ID].properties
+
+        assert.equal(properties.course, 'Drying')
+        assert.equal(properties.dry, 'Auto')
+        assert.equal(properties.remaining_time, 60)
+        assert.equal(properties.initial_time, 60)
+    })
+
     test('0x39 packet decodes a captured Cotton cycle state', () => {
         const { ha, thinq } = makeDevice()
 
@@ -112,4 +207,25 @@ describe(MODEL_ID, () => {
         assert.equal(properties.cycles, 25)
         assert.equal(properties.energy, 9)
     })
+
+    for (const { program, frame } of START_PROGRAM_CAPTURES) {
+        test(`start_program sends captured ${program} command`, () => {
+            const { thinq, dev } = makeDevice()
+
+            thinq.resetRecorder()
+
+            dev.setProperty('stage_program', program)
+
+            /*
+             * Staging only changes the local staged values.
+             * The packet should not be sent until start_program is pressed.
+             */
+            assert.equal(thinq.outbox.length, 0)
+
+            dev.setProperty('start_program', '')
+
+            assert.equal(thinq.outbox.length, 1)
+            assert.equal(hex(thinq.outbox[0]), frame)
+        })
+    }
 })
